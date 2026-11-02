@@ -1,0 +1,87 @@
+name: Active Record (PostgreSQL 19)
+
+# Fork-only workflow. Runs the Active Record suite against a PostgreSQL 19
+# release candidate, so features that only exist there (for example
+# `ON CONFLICT ... DO SELECT`) are actually exercised. Rails CI runs a single
+# server, `postgres:alpine`, so it will not cover them until 19 is GA.
+#
+# This lives on its own branch so it stays out of upstream pull requests.
+# To test a feature branch, run the workflow from the Actions tab and pass
+# that branch as `ref`; the job checks it out instead of this one.
+#
+# Switch the image tag to `postgres:19` once 19.0 is released.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch or SHA to test (defaults to this branch)"
+        type: string
+      full_suite:
+        description: "Run the whole Active Record suite instead of the insert_all tests"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  postgresql:
+    name: insert_all / upsert_all on PostgreSQL 19
+    runs-on: ubuntu-24.04
+
+    services:
+      postgres:
+        image: postgres:19rc1
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      PGHOST: localhost
+      PGPORT: 5432
+      PGUSER: postgres
+      PGPASSWORD: postgres
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3.5"
+          bundler-cache: true
+
+      - name: Install libpq client and headers
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libpq-dev postgresql-client
+
+      - name: Report server version
+        run: psql -XAt -d postgres -c "SELECT version()"
+
+      - name: Create the test databases
+        working-directory: activerecord
+        run: bundle exec rake db:postgresql:rebuild
+
+      - name: Run tests
+        working-directory: activerecord
+        run: |
+          if [ "${{ inputs.full_suite }}" = "true" ]; then
+            bundle exec rake test:postgresql
+          else
+            bundle exec bin/test -a postgresql test/cases/insert_all_test.rb test/cases/adapters/postgresql/postgresql_adapter_test.rb
+          fi
